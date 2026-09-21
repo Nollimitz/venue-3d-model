@@ -316,7 +316,11 @@
   }
   updateCamera();
 
-  var isTouchPrimary = !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+  var isTouchPrimary = !!(
+    (window.matchMedia && window.matchMedia("(pointer: coarse)").matches) ||
+    ("ontouchstart" in window) ||
+    (navigator.maxTouchPoints && navigator.maxTouchPoints > 0)
+  );
 
   var renderer = new THREE.WebGLRenderer({ antialias: !isTouchPrimary });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, isTouchPrimary ? 1.5 : 2));
@@ -553,9 +557,16 @@
   var LEG_HEIGHT = 1;                    // 1 ft legs under each LED wall
 
   var ledCenterX = stageColumn.x;
-  var ledZ = stageColumn.z - 2.5;        // pulled forward off the column so the panel doesn't clip it
-  var stageGroup = new THREE.Group();
-  scene.add(stageGroup);
+  var ledZ = stageColumn.z - 3;          // just in front of the pillar, with enough clearance for the 5° left rotation to still clear the curved wall
+  // Everything below is built in LOCAL coordinates relative to this pivot, then the
+  // whole thing is parented under one Group — so it's genuinely linked as one rigid
+  // unit, not separately-computed pieces that happen to match up.
+  var ASSEMBLY_ANGLE = THREE.MathUtils.degToRad(-5); // a bit to the left
+  var stageAssembly = new THREE.Group();
+  stageAssembly.position.set(ledCenterX, 0, ledZ);
+  stageAssembly.rotation.y = ASSEMBLY_ANGLE;
+  scene.add(stageAssembly);
+  var stageGroup = stageAssembly; // buildLEDWall() below still just adds to "stageGroup"
 
   // LED tile texture: a 9x5 grid so individual panels read clearly.
   var ledCanvas = document.createElement("canvas");
@@ -580,8 +591,8 @@
   });
   var legMat = new THREE.MeshStandardMaterial({ color: 0x2b2b2f, roughness: 0.6 });
 
-  // Builds one LED wall (panel + two legs) centered at (cx,cz), rotated rotY around
-  // its own center, all sharing the same 9x5 @ 500mm dimensions.
+  // Builds one LED wall (panel + two legs), positioned/rotated in LOCAL coordinates
+  // relative to the shared assembly pivot — so it moves and turns with everything else.
   function buildLEDWall(cx, cz, rotY) {
     var group = new THREE.Group();
     var panel = new THREE.Mesh(new THREE.BoxGeometry(LED_WIDTH, LED_HEIGHT, 0.35), ledPanelMat);
@@ -601,15 +612,16 @@
     return group;
   }
 
-  // Center wall, flat.
-  buildLEDWall(ledCenterX, ledZ, 0);
+  // Center wall — at the local origin (the assembly's own pivot).
+  buildLEDWall(0, 0, 0);
 
   // Left and right wings: same size, hinged off the center wall's edges and angled
-  // inward toward the audience for a wraparound look.
+  // inward toward the audience for a wraparound look — same spacing as always, just
+  // now expressed in local coordinates so they travel with the group.
   var WING_ANGLE = THREE.MathUtils.degToRad(15);
   var WING_GAP = 2; // flat gap between the center wall and each side wall
-  var leftHinge = { x: ledCenterX - LED_WIDTH / 2 - WING_GAP, z: ledZ };
-  var rightHinge = { x: ledCenterX + LED_WIDTH / 2 + WING_GAP, z: ledZ };
+  var leftHinge = { x: -LED_WIDTH / 2 - WING_GAP, z: 0 };
+  var rightHinge = { x: LED_WIDTH / 2 + WING_GAP, z: 0 };
   var leftDir = { x: -Math.cos(WING_ANGLE), z: -Math.sin(WING_ANGLE) };
   var rightDir = { x: Math.cos(WING_ANGLE), z: -Math.sin(WING_ANGLE) };
   var leftCenter = { x: leftHinge.x + leftDir.x * (LED_WIDTH / 2), z: leftHinge.z + leftDir.z * (LED_WIDTH / 2) };
@@ -619,11 +631,12 @@
   buildLEDWall(leftCenter.x, leftCenter.z, leftRotY);
   buildLEDWall(rightCenter.x, rightCenter.z, rightRotY);
 
-  // Stage platform, a little wider than the center LED wall, sized down from before.
+  // Stage platform, a little wider than the center LED wall — same local frame, so it
+  // stays locked to the LED wall's position and now shares its rotation too.
   var STAGE_DEPTH = 8, STAGE_WIDTH = LED_WIDTH + 3, STAGE_HEIGHT = 2;
   var stageMat = new THREE.MeshStandardMaterial({ color: 0x141416, roughness: 0.75 });
   var stagePlatform = new THREE.Mesh(new THREE.BoxGeometry(STAGE_WIDTH, STAGE_HEIGHT, STAGE_DEPTH), stageMat);
-  stagePlatform.position.set(ledCenterX, STAGE_HEIGHT / 2, ledZ - STAGE_DEPTH / 2 - 0.3);
+  stagePlatform.position.set(0, STAGE_HEIGHT / 2, -(STAGE_DEPTH / 2 + 0.3));
   stageGroup.add(stagePlatform);
   var stageEdges = new THREE.LineSegments(
     new THREE.EdgesGeometry(stagePlatform.geometry),
@@ -649,9 +662,12 @@
     return [p[0] + (dx / d) * DRAPE_INSET, p[1] + (dz / d) * DRAPE_INSET];
   }
   function tooCloseToFixtures(x, z) {
-    // Stage platform footprint (with margin)
+    // Stage platform footprint (with margin) — approximated in world space using the
+    // assembly's known pivot and offset (stagePlatform.position is now local to the
+    // rotated group, not world coordinates).
+    var stageWorldZ = ledZ - (STAGE_DEPTH / 2 + 0.3);
     var sx1 = ledCenterX - STAGE_WIDTH / 2 - 1, sx2 = ledCenterX + STAGE_WIDTH / 2 + 1;
-    var sz1 = stagePlatform.position.z - STAGE_DEPTH / 2 - 1, sz2 = stagePlatform.position.z + STAGE_DEPTH / 2 + 1;
+    var sz1 = stageWorldZ - STAGE_DEPTH / 2 - 1, sz2 = stageWorldZ + STAGE_DEPTH / 2 + 1;
     if (x >= sx1 && x <= sx2 && z >= sz1 && z <= sz2) return true;
     // Any column, with clearance
     for (var k = 0; k < columns.length; k++) {
@@ -799,6 +815,11 @@
     // A focused button intercepts Space as a click (toggling us right back out of fly
     // mode) — blur it so Space is only ever "move up" while flying.
     if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+    // Re-assert the start position one frame later too, in case anything else (a
+    // stray resize/orbit callback) touches the camera in between.
+    requestAnimationFrame(function () {
+      if (navMode === "fly") camera.position.set(ROOM_CENTER_X, 5.5, ROOM_CENTER_Z);
+    });
   }
   function resetFlyPosition() {
     flyYaw = -spherical.theta;
@@ -953,7 +974,7 @@
     var joyMove = new THREE.Vector3();
     if (Math.abs(joystickVec.x) > 0.02 || Math.abs(joystickVec.y) > 0.02) {
       joyMove.addScaledVector(flatDir, -joystickVec.y);
-      joyMove.addScaledVector(rightDir, joystickVec.x);
+      joyMove.addScaledVector(rightDir, -joystickVec.x);
     }
 
     var move = kbMove.add(joyMove);
