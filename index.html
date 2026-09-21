@@ -1,0 +1,807 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>3D Building Massing Model</title>
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<style>
+  :root {
+    --bg: #eef1f4;
+    --panel-bg: rgba(255,255,255,0.92);
+    --text: #1c2430;
+    --muted: #5b6472;
+    --accent: #2f6fed;
+    --border: #d7dce3;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #14181f;
+      --panel-bg: rgba(24,29,38,0.92);
+      --text: #eef1f4;
+      --muted: #a3adba;
+      --accent: #6c9bff;
+      --border: #2b3240;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #14181f;
+    --panel-bg: rgba(24,29,38,0.92);
+    --text: #eef1f4;
+    --muted: #a3adba;
+    --accent: #6c9bff;
+    --border: #2b3240;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0;
+    width: 100%; height: 100%;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    overflow: hidden;
+    padding-top: env(safe-area-inset-top, 0px);
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  #scene-container { position: fixed; inset: 0; }
+  canvas { display: block; touch-action: none; }
+
+  #top-bar {
+    position: fixed;
+    top: calc(14px + env(safe-area-inset-top, 0px));
+    left: 14px; right: 14px;
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    pointer-events: none;
+    z-index: 10;
+    gap: 10px;
+    flex-wrap: wrap;
+  }
+  .panel {
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 12px 16px;
+    backdrop-filter: blur(10px);
+    pointer-events: auto;
+    box-shadow: 0 4px 18px rgba(0,0,0,0.08);
+  }
+  #title-panel h1 {
+    font-size: 15px;
+    margin: 0 0 2px 0;
+    font-weight: 650;
+  }
+  #title-panel p {
+    margin: 0;
+    font-size: 12px;
+    color: var(--muted);
+    max-width: 320px;
+  }
+  #controls-panel {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 168px;
+  }
+  #controls-panel label {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 12.5px;
+    cursor: pointer;
+    user-select: none;
+  }
+  #controls-panel input[type="range"] { width: 100%; }
+  .btn-row { display: flex; gap: 6px; flex-wrap: wrap; }
+  button.viewbtn {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text);
+    border-radius: 8px;
+    padding: 5px 9px;
+    font-size: 11.5px;
+    cursor: pointer;
+  }
+  button.viewbtn:hover { border-color: var(--accent); color: var(--accent); }
+
+  #hint, #flyHint {
+    position: fixed;
+    bottom: calc(14px + env(safe-area-inset-bottom, 0px));
+    left: 50%;
+    transform: translateX(-50%);
+    font-size: 11.5px;
+    color: var(--muted);
+    background: var(--panel-bg);
+    border: 1px solid var(--border);
+    border-radius: 999px;
+    padding: 7px 14px;
+    pointer-events: none;
+    z-index: 10;
+    white-space: nowrap;
+  }
+
+  #loading {
+    position: fixed; inset: 0;
+    display: flex; align-items: center; justify-content: center;
+    background: var(--bg);
+    z-index: 100;
+    font-size: 13px;
+    color: var(--muted);
+  }
+</style>
+</head>
+<body>
+
+<div id="loading">Building model…</div>
+<div id="scene-container"></div>
+
+<div id="top-bar">
+  <div id="title-panel" class="panel">
+    <h1>Office Floor Plan — 3D Massing</h1>
+    <p>Boundary traced from your marked-up plan. Tan = walls, dark stanchions = pipe &amp; drape, light blocks = structural columns.</p>
+  </div>
+  <div id="controls-panel" class="panel">
+    <label><input type="checkbox" id="roofToggle"> Show roof</label>
+    <label>Wall height
+      <input type="range" id="heightSlider" min="6" max="16" step="0.5" value="10">
+    </label>
+    <div class="btn-row">
+      <button class="viewbtn" data-view="iso">Isometric</button>
+      <button class="viewbtn" data-view="top">Top</button>
+      <button class="viewbtn" data-view="front">Front</button>
+      <button class="viewbtn" data-view="street">Street</button>
+    </div>
+    <button class="viewbtn" id="flyBtn" style="margin-top:2px;">🚶 Free Fly (click to walk)</button>
+  </div>
+</div>
+
+<div id="hint">Drag to orbit · Scroll to zoom · Right-drag to pan</div>
+<div id="flyHint" style="display:none;">WASD to move · Mouse to look · Space/Shift up-down · Esc to exit</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  // ---------- Room data (feet) ----------
+  // Exterior footprint digitized from the boundary the user traced in red, in labeled
+  // sections so the curved section (a pipe-and-drape curtain per the reference photo,
+  // not a solid wall) can be styled differently and rendered as a smooth curve.
+  var topWall  = [[108.4, 0.0], [21.2, 0.0]];
+  var chamfer  = [[19.27,3.37],[17.46,3.19],[16.3,4.26],[14.88,8.69],[7.27,20.03],[4.3,27.3],[0.3,32.8]];
+  var curveRaw = [[0.3,32.8],[0.04,35.81],[5.85,36.35],[9.46,38.65],[23.65,42.55],[38.49,49.29],
+                  [51.64,52.66],[58.35,53.19],[66.74,55.14],[80.02,55.67],[84.15,54.79],[94.34,54.79],[94.86,53.72]];
+  var eastWing = [[95.12,10.28],[108.02,9.93]];
+
+  // Smooth, EVEN curve: fit a single circular arc through the traced points (least-
+  // squares best-fit circle) instead of following the small wobbles of the hand trace.
+  var arcCenter = { x: 78.8938, z: -98.7675 };
+  var arcRadius = 153.797;
+  var arcAngleStart = THREE.MathUtils.degToRad(120.8526);
+  var arcAngleEnd = THREE.MathUtils.degToRad(84.0226);
+  var curveSmooth = [];
+  var ARC_SEGMENTS = 48;
+  for (var ai = 0; ai <= ARC_SEGMENTS; ai++) {
+    var t = ai / ARC_SEGMENTS;
+    var ang = arcAngleStart + (arcAngleEnd - arcAngleStart) * t;
+    curveSmooth.push([arcCenter.x + arcRadius * Math.cos(ang), arcCenter.z + arcRadius * Math.sin(ang)]);
+  }
+  // Pin the endpoints exactly to the traced corners so the arc meets the chamfer and
+  // east wing walls with no gap.
+  curveSmooth[0] = curveRaw[0].slice();
+  curveSmooth[curveSmooth.length - 1] = curveRaw[curveRaw.length - 1].slice();
+
+  var footprint = topWall.concat(chamfer).concat(curveSmooth).concat(eastWing);
+  var southCurve = curveSmooth; // reused as the Open Office's south wall
+
+  // Structural columns — digitized from the filled column markers in the plan, which
+  // sit at gridlines C, D and E, in two rows (confirmed against the reference photo's
+  // square columns).
+  var columns = [
+    [21.2, 31.1], [50.55, 31.6], [79.96, 30.1],
+    [21.2, 40.6], [50.55, 48.8], [79.9, 50.8]
+  ];
+
+  var rooms = [
+    // Top row, widths taken from the dimension strings on the plan (6'-6", 10'-4", 10'-6",
+    // 10'-6", 19'-10", 10'-8", 9'-8", 9'-3"), which sum to 87.2 ft — matching the traced
+    // top wall almost exactly.
+    { name: "Hallway",        rect: [21.2, 0, 27.7, 16],  color: 0xd8d2c2 },
+    { name: "Work Room",       rect: [27.7, 0, 38.03, 16], color: 0xc6b6d9 },
+    { name: "Office",       rect: [38.03, 0, 48.53, 16], color: 0xe3c894 },
+    { name: "Office",       rect: [48.53, 0, 59.03, 16], color: 0xe3c894 },
+    { name: "War Room",        rect: [59.03, 0, 78.86, 16], color: 0xd98f8f },
+    { name: "Office",       rect: [78.86, 0, 89.53, 16], color: 0xe3c894 },
+    { name: "Merchandise",     rect: [89.53, 0, 95.12, 16], color: 0xb7d3c3 },
+    { name: "Office",      poly: [[95.12,0],[108.4,0],[108.02,9.93],[95.12,10.28]], color: 0xe3c894 },
+
+    // West chamfer corner offices, outer edge following the exact traced wall.
+    { name: "Office",      poly: [[21.2,0],[19.27,3.37],[17.46,3.19],[16.3,4.26],[14.88,8.69],[14.88,16],[21.2,16]], color: 0xe3c894 },
+    { name: "Office",      poly: [[14.88,8.69],[7.27,20.03],[4.3,27.3],[0.3,32.8],[0.04,35.81],[9,32],[16,20],[16,8.69]], color: 0xe3c894 },
+
+    { name: "Open Office",     poly: [[16,16],[89.53,16],[89.53,40]].concat(southCurve.slice().reverse()).concat([[16,20]]), color: 0xf0ece2 },
+
+    // East wing offices, outer/south edge following the traced boundary; west edge and
+    // internal splits are approximate (not part of the traced line).
+    { name: "Hallway",   rect: [89.53, 10.28, 95.12, 53.72], color: 0xd8d2c2 },
+    { name: "Office",      rect: [79.53, 10.28, 89.53, 24.28], color: 0xe3c894 },
+    { name: "Office",      rect: [79.53, 24.28, 89.53, 34.78], color: 0xe3c894 },
+    { name: "Office",      rect: [79.53, 34.78, 89.53, 45.28], color: 0xe3c894 },
+    { name: "Office",      rect: [79.53, 45.28, 89.53, 54.79], color: 0xe3c894 }
+  ];
+
+  var WALL_H = 10;       // default height, ft
+  var PARTITION_H_RATIO = 0.62; // interior partitions read as lower than exterior walls
+  var WALL_T = 0.4;
+
+  // ---------- Three.js setup ----------
+  var container = document.getElementById("scene-container");
+  var scene = new THREE.Scene();
+  scene.background = new THREE.Color(0xeef1f4);
+  scene.fog = new THREE.Fog(0xeef1f4, 260, 620);
+
+  var camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 3000);
+  var target = new THREE.Vector3(54, 0, 26);
+  var spherical = { radius: 260, theta: Math.PI * 0.28, phi: Math.PI * 0.32 };
+
+  function updateCamera() {
+    var x = target.x + spherical.radius * Math.sin(spherical.phi) * Math.sin(spherical.theta);
+    var y = spherical.radius * Math.cos(spherical.phi);
+    var z = target.z + spherical.radius * Math.sin(spherical.phi) * Math.cos(spherical.theta);
+    camera.position.set(x, y, z);
+    camera.lookAt(target);
+  }
+  updateCamera();
+
+  var renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setSize(window.innerWidth, window.innerHeight);
+  container.appendChild(renderer.domElement);
+
+  // Lights
+  scene.add(new THREE.AmbientLight(0xffffff, 0.65));
+  var sun = new THREE.DirectionalLight(0xffffff, 0.75);
+  sun.position.set(120, 180, 90);
+  scene.add(sun);
+  var fill = new THREE.DirectionalLight(0xbcd0ff, 0.25);
+  fill.position.set(-100, 80, -60);
+  scene.add(fill);
+
+  // Ground
+  var groundGeo = new THREE.PlaneGeometry(2000, 2000);
+  var groundMat = new THREE.MeshStandardMaterial({ color: 0xdfe6ea, roughness: 1 });
+  var ground = new THREE.Mesh(groundGeo, groundMat);
+  ground.rotation.x = -Math.PI / 2;
+  ground.position.y = -0.05;
+  scene.add(ground);
+
+  // ---------- Helpers ----------
+  function shapeFromPoints(pts) {
+    var shape = new THREE.Shape();
+    shape.moveTo(pts[0][0], pts[0][1]);
+    for (var i = 1; i < pts.length; i++) shape.lineTo(pts[i][0], pts[i][1]);
+    shape.closePath();
+    return shape;
+  }
+  function rectToPoints(r) {
+    return [[r[0], r[1]], [r[2], r[1]], [r[2], r[3]], [r[0], r[3]]];
+  }
+
+  var roomGroup = new THREE.Group();
+  var labelGroup = new THREE.Group();
+  var roofGroup = new THREE.Group();
+  scene.add(roomGroup, labelGroup, roofGroup);
+
+  function makeLabelSprite(text) {
+    var canvas = document.createElement("canvas");
+    var ctx = canvas.getContext("2d");
+    var fontSize = 46;
+    ctx.font = "700 " + fontSize + "px -apple-system, Arial, sans-serif";
+    var padding = 20;
+    var w = Math.ceil(ctx.measureText(text).width) + padding * 2;
+    var h = fontSize + padding * 1.5;
+    canvas.width = w; canvas.height = h;
+    ctx.font = "700 " + fontSize + "px -apple-system, Arial, sans-serif";
+    ctx.fillStyle = "rgba(14,17,23,0.94)";
+    roundRect(ctx, 0, 0, w, h, 14);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(255,255,255,0.25)";
+    ctx.lineWidth = 2;
+    roundRect(ctx, 1, 1, w - 2, h - 2, 13);
+    ctx.stroke();
+    ctx.fillStyle = "#ffffff";
+    ctx.textBaseline = "middle";
+    ctx.fillText(text, padding, h / 2 + 2);
+    var tex = new THREE.CanvasTexture(canvas);
+    tex.minFilter = THREE.LinearFilter;
+    var mat = new THREE.SpriteMaterial({ map: tex, depthTest: false, transparent: true });
+    var sprite = new THREE.Sprite(mat);
+    var scale = 0.1;
+    sprite.scale.set(w * scale, h * scale, 1);
+    sprite.renderOrder = 999;
+    return sprite;
+  }
+  function roundRect(ctx, x, y, w, h, r) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+  }
+
+  // "Engraved" room-name text, laid flat into the floor — a shadow offset one way and
+  // a highlight offset the other, like a carved/etched groove.
+  function makeFloorLabel(text, maxWidthFt) {
+    var canvas = document.createElement("canvas");
+    var ctx = canvas.getContext("2d");
+    var fontSize = 120;
+    ctx.font = "700 " + fontSize + "px -apple-system, Arial, sans-serif";
+    var textW = ctx.measureText(text).width;
+    canvas.width = Math.ceil(textW + 90);
+    canvas.height = fontSize + 90;
+    ctx.font = "700 " + fontSize + "px -apple-system, Arial, sans-serif";
+    ctx.textBaseline = "middle";
+    ctx.textAlign = "center";
+    var cx = canvas.width / 2, cy = canvas.height / 2;
+    ctx.fillStyle = "rgba(0,0,0,0.5)";
+    ctx.fillText(text, cx + 3, cy + 4);
+    ctx.fillStyle = "rgba(255,255,255,0.4)";
+    ctx.fillText(text, cx - 2, cy - 2);
+    ctx.fillStyle = "rgba(80,82,88,0.92)";
+    ctx.fillText(text, cx, cy);
+    var tex = new THREE.CanvasTexture(canvas);
+    tex.minFilter = THREE.LinearFilter;
+    var aspect = canvas.width / canvas.height;
+    var worldW = maxWidthFt, worldH = worldW / aspect;
+    var geo = new THREE.PlaneGeometry(worldW, worldH);
+    var mat = new THREE.MeshBasicMaterial({ map: tex, transparent: true, depthWrite: false });
+    var mesh = new THREE.Mesh(geo, mat);
+    mesh.rotation.x = -Math.PI / 2;
+    mesh.renderOrder = 5;
+    return mesh;
+  }
+  function bboxOf(pts) {
+    var xs = pts.map(function (p) { return p[0]; });
+    var zs = pts.map(function (p) { return p[1]; });
+    return { minX: Math.min.apply(null, xs), maxX: Math.max.apply(null, xs), minZ: Math.min.apply(null, zs), maxZ: Math.max.apply(null, zs) };
+  }
+
+  function centroid(pts) {
+    var cx = 0, cz = 0;
+    pts.forEach(function (p) { cx += p[0]; cz += p[1]; });
+    return [cx / pts.length, cz / pts.length];
+  }
+
+  // The individual room blocks (offices, hallways, work room, etc.) have been removed —
+  // only the main open room we're working in remains, as one continuous floor.
+  var roomMeshes = [];
+
+  // Exterior shell (thin wall loop following footprint) + floor slab + roof
+  var footShape = shapeFromPoints(footprint);
+  var floorGeo = new THREE.ShapeGeometry(footShape);
+  floorGeo.rotateX(-Math.PI / 2);
+  floorGeo.scale(1, 1, -1); // rotateX(-90°) on a flat XY shape negates world Z — flip it back so the floor lands under the walls instead of mirrored to the north
+
+  // Carpet texture (uploaded swatch), tiled across the floor at roughly real-world scale.
+  var carpetImg = new Image();
+  var carpetTex = new THREE.Texture(carpetImg);
+  carpetTex.wrapS = THREE.RepeatWrapping;
+  carpetTex.wrapT = THREE.RepeatWrapping;
+  carpetImg.onload = function () {
+    carpetTex.needsUpdate = true;
+    renderer.render(scene, camera);
+  };
+  carpetImg.src = "data:image/png;base64,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";
+  var fpXs = footprint.map(function (p) { return p[0]; });
+  var fpZs = footprint.map(function (p) { return p[1]; });
+  var fpW = Math.max.apply(null, fpXs) - Math.min.apply(null, fpXs);
+  var fpD = Math.max.apply(null, fpZs) - Math.min.apply(null, fpZs);
+  carpetTex.repeat.set(fpW / 2, fpD / 2); // ~2ft carpet tile repeat, real-world scale
+
+  var floorMat = new THREE.MeshStandardMaterial({ map: carpetTex, color: 0xffffff, roughness: 1, side: THREE.DoubleSide });
+  var floor = new THREE.Mesh(floorGeo, floorMat);
+  floor.position.y = 0.01;
+  scene.add(floor);
+
+  var shellPts = footprint;
+  var shellSegments = [];
+  for (var i = 0; i < shellPts.length; i++) {
+    shellSegments.push([shellPts[i], shellPts[(i + 1) % shellPts.length]]);
+  }
+  // The curved section's start/end indices are kept for placing the pipe-and-drape
+  // decoration below — the wall itself is now solid, matching every other wall.
+  var drapeStartIdx = topWall.length + chamfer.length;              // index of curveSmooth[0]
+  var drapeEndIdx = drapeStartIdx + curveSmooth.length - 1;         // index of curveSmooth[last]
+
+  var wallGroup = new THREE.Group();
+  scene.add(wallGroup);
+  var wallMat = new THREE.MeshStandardMaterial({ color: 0xc9a876, roughness: 0.85 });
+  shellSegments.forEach(function (seg, idx) {
+    var p0 = seg[0], p1 = seg[1];
+    var dx = p1[0] - p0[0], dz = p1[1] - p0[1];
+    var len = Math.sqrt(dx * dx + dz * dz);
+    if (len < 0.01) return;
+    var geo = new THREE.BoxGeometry(len, WALL_H, WALL_T);
+    var mesh = new THREE.Mesh(geo, wallMat);
+    mesh.position.set((p0[0] + p1[0]) / 2, WALL_H / 2, (p0[1] + p1[1]) / 2);
+    mesh.rotation.y = -Math.atan2(dz, dx);
+    wallGroup.add(mesh);
+  });
+
+  // Structural columns, positioned from the plan's column markers (gridlines C, D, E).
+  var columnGroup = new THREE.Group();
+  scene.add(columnGroup);
+  var columnMat = new THREE.MeshStandardMaterial({ color: 0xe9e9e6, roughness: 0.85 });
+  var COLUMN_SIZE = 2.0;
+  columns.forEach(function (c) {
+    var geo = new THREE.BoxGeometry(COLUMN_SIZE, WALL_H, COLUMN_SIZE);
+    var mesh = new THREE.Mesh(geo, columnMat);
+    mesh.position.set(c[0], WALL_H / 2, c[1]);
+    columnGroup.add(mesh);
+    var edges = new THREE.EdgesGeometry(geo);
+    var line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0x9aa0a8 }));
+    line.position.copy(mesh.position);
+    columnGroup.add(line);
+  });
+
+  var roofMat = new THREE.MeshStandardMaterial({ color: 0x7d8896, roughness: 0.9, side: THREE.DoubleSide });
+  var roofGeo = new THREE.ShapeGeometry(footShape);
+  roofGeo.rotateX(-Math.PI / 2);
+  roofGeo.scale(1, 1, -1); // same Z-inversion fix as the floor, so the roof lines up with the walls below it
+  var roof = new THREE.Mesh(roofGeo, roofMat);
+  roof.position.y = WALL_H + 0.05;
+  roof.visible = false;
+  roofGroup.add(roof);
+
+  function applyHeight(h) {
+    WALL_H = h;
+    wallGroup.children.forEach(function (mesh) {
+      mesh.scale.y = h / 10;
+      mesh.position.y = h / 2;
+    });
+    columnGroup.children.forEach(function (obj) {
+      obj.scale.y = h / 10;
+      obj.position.y = h / 2;
+    });
+    roomMeshes.forEach(function (mesh) {
+      mesh.scale.y = h / 10;
+      var label = mesh.userData.label;
+      if (label) label.position.y = h * 0.62 * mesh.userData.baseHeightRatio / 0.62 + mesh.userData.labelBaseY;
+    });
+    roof.position.y = h + 0.05;
+  }
+
+  // ---------- Stage + LED wall(s) ----------
+  // Repositioned against the row-2 column (50.55, 48.8) — close to both the curved
+  // drape wall and a pillar, matching the reference photo.
+  var stageColumn = { x: 50.55, z: 48.8 };
+
+  var FT_PER_MM = 0.00328084;
+  var LED_TILE = 500 * FT_PER_MM;      // 500mm tile -> ~1.64 ft
+  var LED_COLS = 9, LED_ROWS = 5;
+  var LED_WIDTH = LED_COLS * LED_TILE;   // ~14.76 ft
+  var LED_HEIGHT = LED_ROWS * LED_TILE;  // ~8.20 ft
+  var LEG_HEIGHT = 1;                    // 1 ft legs under each LED wall
+
+  var ledCenterX = stageColumn.x;
+  var ledZ = stageColumn.z - 2.5;        // pulled forward off the column so the panel doesn't clip it
+  var stageGroup = new THREE.Group();
+  scene.add(stageGroup);
+
+  // LED tile texture: a 9x5 grid so individual panels read clearly.
+  var ledCanvas = document.createElement("canvas");
+  ledCanvas.width = LED_COLS * 60; ledCanvas.height = LED_ROWS * 60;
+  var lctx = ledCanvas.getContext("2d");
+  lctx.fillStyle = "#0a0d16"; lctx.fillRect(0, 0, ledCanvas.width, ledCanvas.height);
+  lctx.strokeStyle = "rgba(110,150,255,0.55)"; lctx.lineWidth = 2;
+  for (var gc = 0; gc <= LED_COLS; gc++) {
+    lctx.beginPath(); lctx.moveTo(gc * 60, 0); lctx.lineTo(gc * 60, ledCanvas.height); lctx.stroke();
+  }
+  for (var gr = 0; gr <= LED_ROWS; gr++) {
+    lctx.beginPath(); lctx.moveTo(0, gr * 60); lctx.lineTo(ledCanvas.width, gr * 60); lctx.stroke();
+  }
+  var grad = lctx.createLinearGradient(0, 0, 0, ledCanvas.height);
+  grad.addColorStop(0, "rgba(90,60,220,0.35)");
+  grad.addColorStop(1, "rgba(20,10,60,0.15)");
+  lctx.fillStyle = grad; lctx.fillRect(0, 0, ledCanvas.width, ledCanvas.height);
+  var ledTexture = new THREE.CanvasTexture(ledCanvas);
+
+  var ledPanelMat = new THREE.MeshStandardMaterial({
+    map: ledTexture, emissive: 0x5a3cdc, emissiveIntensity: 0.55, roughness: 0.4
+  });
+  var legMat = new THREE.MeshStandardMaterial({ color: 0x2b2b2f, roughness: 0.6 });
+
+  // Builds one LED wall (panel + two legs) centered at (cx,cz), rotated rotY around
+  // its own center, all sharing the same 9x5 @ 500mm dimensions.
+  function buildLEDWall(cx, cz, rotY) {
+    var group = new THREE.Group();
+    var panel = new THREE.Mesh(new THREE.BoxGeometry(LED_WIDTH, LED_HEIGHT, 0.35), ledPanelMat);
+    panel.position.set(0, LEG_HEIGHT + LED_HEIGHT / 2, 0);
+    group.add(panel);
+    var edges = new THREE.LineSegments(new THREE.EdgesGeometry(panel.geometry), new THREE.LineBasicMaterial({ color: 0x000000 }));
+    edges.position.copy(panel.position);
+    group.add(edges);
+    [-1, 1].forEach(function (side) {
+      var leg = new THREE.Mesh(new THREE.BoxGeometry(0.5, LEG_HEIGHT, 0.5), legMat);
+      leg.position.set(side * (LED_WIDTH / 2 - 1), LEG_HEIGHT / 2, 0);
+      group.add(leg);
+    });
+    group.position.set(cx, 0, cz);
+    group.rotation.y = rotY;
+    stageGroup.add(group);
+    return group;
+  }
+
+  // Center wall, flat.
+  buildLEDWall(ledCenterX, ledZ, 0);
+
+  // Left and right wings: same size, hinged off the center wall's edges and angled
+  // inward toward the audience for a wraparound look.
+  var WING_ANGLE = THREE.MathUtils.degToRad(15);
+  var WING_GAP = 2; // flat gap between the center wall and each side wall
+  var leftHinge = { x: ledCenterX - LED_WIDTH / 2 - WING_GAP, z: ledZ };
+  var rightHinge = { x: ledCenterX + LED_WIDTH / 2 + WING_GAP, z: ledZ };
+  var leftDir = { x: -Math.cos(WING_ANGLE), z: -Math.sin(WING_ANGLE) };
+  var rightDir = { x: Math.cos(WING_ANGLE), z: -Math.sin(WING_ANGLE) };
+  var leftCenter = { x: leftHinge.x + leftDir.x * (LED_WIDTH / 2), z: leftHinge.z + leftDir.z * (LED_WIDTH / 2) };
+  var rightCenter = { x: rightHinge.x + rightDir.x * (LED_WIDTH / 2), z: rightHinge.z + rightDir.z * (LED_WIDTH / 2) };
+  var leftRotY = Math.atan2(-leftDir.z, leftDir.x);
+  var rightRotY = Math.atan2(-rightDir.z, rightDir.x);
+  buildLEDWall(leftCenter.x, leftCenter.z, leftRotY);
+  buildLEDWall(rightCenter.x, rightCenter.z, rightRotY);
+
+  // Stage platform, a little wider than the center LED wall, sized down from before.
+  var STAGE_DEPTH = 8, STAGE_WIDTH = LED_WIDTH + 3, STAGE_HEIGHT = 2;
+  var stageMat = new THREE.MeshStandardMaterial({ color: 0x141416, roughness: 0.75 });
+  var stagePlatform = new THREE.Mesh(new THREE.BoxGeometry(STAGE_WIDTH, STAGE_HEIGHT, STAGE_DEPTH), stageMat);
+  stagePlatform.position.set(ledCenterX, STAGE_HEIGHT / 2, ledZ - STAGE_DEPTH / 2 - 0.3);
+  stageGroup.add(stagePlatform);
+  var stageEdges = new THREE.LineSegments(
+    new THREE.EdgesGeometry(stagePlatform.geometry),
+    new THREE.LineBasicMaterial({ color: 0x000000 })
+  );
+  stageEdges.position.copy(stagePlatform.position);
+  stageGroup.add(stageEdges);
+
+  // ---------- Pipe and drape along the curved back wall ----------
+  // Freestanding stanchions + fabric panels just inside the (now solid, tan) curved
+  // wall, matching the reference photo. Inset toward the room using the true radial
+  // normal of the fitted arc, and skipped near the LED walls, stage, or a column.
+  var drapeDecorGroup = new THREE.Group();
+  scene.add(drapeDecorGroup);
+  var pipeMat = new THREE.MeshStandardMaterial({ color: 0x2b2b2f, roughness: 0.4, metalness: 0.6 });
+  var fabricMat = new THREE.MeshStandardMaterial({ color: 0x241428, roughness: 0.95, side: THREE.DoubleSide });
+  var DRAPE_INSET = 1.3, DRAPE_HEIGHT = 9, PIPE_RADIUS = 0.12;
+  var DRAPE_STEP = 4; // every 4th sampled curve point -> ~8 ft panel width
+
+  function insetPoint(p) {
+    var dx = arcCenter.x - p[0], dz = arcCenter.z - p[1];
+    var d = Math.sqrt(dx * dx + dz * dz);
+    return [p[0] + (dx / d) * DRAPE_INSET, p[1] + (dz / d) * DRAPE_INSET];
+  }
+  function tooCloseToFixtures(x, z) {
+    // Stage platform footprint (with margin)
+    var sx1 = ledCenterX - STAGE_WIDTH / 2 - 1, sx2 = ledCenterX + STAGE_WIDTH / 2 + 1;
+    var sz1 = stagePlatform.position.z - STAGE_DEPTH / 2 - 1, sz2 = stagePlatform.position.z + STAGE_DEPTH / 2 + 1;
+    if (x >= sx1 && x <= sx2 && z >= sz1 && z <= sz2) return true;
+    // Any column, with clearance
+    for (var k = 0; k < columns.length; k++) {
+      var ddx = x - columns[k][0], ddz = z - columns[k][1];
+      if (Math.sqrt(ddx * ddx + ddz * ddz) < COLUMN_SIZE / 2 + 1.5) return true;
+    }
+    return false;
+  }
+
+  for (var di = 0; di + DRAPE_STEP < curveSmooth.length; di += DRAPE_STEP) {
+    var a = insetPoint(curveSmooth[di]);
+    var b = insetPoint(curveSmooth[Math.min(di + DRAPE_STEP, curveSmooth.length - 1)]);
+    var mx = (a[0] + b[0]) / 2, mz = (a[1] + b[1]) / 2;
+    if (tooCloseToFixtures(mx, mz) || tooCloseToFixtures(a[0], a[1]) || tooCloseToFixtures(b[0], b[1])) continue;
+
+    var pdx = b[0] - a[0], pdz = b[1] - a[1];
+    var plen = Math.sqrt(pdx * pdx + pdz * pdz);
+    if (plen < 0.1) continue;
+
+    // Stanchion at the start of this panel
+    var pipe = new THREE.Mesh(new THREE.CylinderGeometry(PIPE_RADIUS, PIPE_RADIUS, DRAPE_HEIGHT, 10), pipeMat);
+    pipe.position.set(a[0], DRAPE_HEIGHT / 2, a[1]);
+    drapeDecorGroup.add(pipe);
+
+    // Fabric panel spanning to the next stanchion
+    var panel = new THREE.Mesh(new THREE.BoxGeometry(plen, DRAPE_HEIGHT * 0.94, 0.08), fabricMat);
+    panel.position.set(mx, DRAPE_HEIGHT * 0.47, mz);
+    panel.rotation.y = -Math.atan2(pdz, pdx);
+    drapeDecorGroup.add(panel);
+  }
+  // Closing stanchion at the very end of the curve
+  var lastInset = insetPoint(curveSmooth[curveSmooth.length - 1]);
+  if (!tooCloseToFixtures(lastInset[0], lastInset[1])) {
+    var lastPipe = new THREE.Mesh(new THREE.CylinderGeometry(PIPE_RADIUS, PIPE_RADIUS, DRAPE_HEIGHT, 10), pipeMat);
+    lastPipe.position.set(lastInset[0], DRAPE_HEIGHT / 2, lastInset[1]);
+    drapeDecorGroup.add(lastPipe);
+  }
+
+  // ---------- 5'10" person, for scale reference ----------
+  (function addScaleFigure() {
+    var TOTAL_H = 5 + 10 / 12; // 5'10" in feet ≈ 5.833
+    var legH = TOTAL_H * 0.47, torsoH = TOTAL_H * 0.38, headD = TOTAL_H * 0.15;
+    var figMat = new THREE.MeshStandardMaterial({ color: 0x6b7280, roughness: 0.6 });
+    var figGroup = new THREE.Group();
+
+    var legs = new THREE.Mesh(new THREE.CylinderGeometry(0.42, 0.5, legH, 14), figMat);
+    legs.position.y = legH / 2;
+    figGroup.add(legs);
+
+    var torso = new THREE.Mesh(new THREE.CylinderGeometry(0.55, 0.5, torsoH, 14), figMat);
+    torso.position.y = legH + torsoH / 2;
+    figGroup.add(torso);
+
+    var head = new THREE.Mesh(new THREE.SphereGeometry(headD / 2, 16, 12), figMat);
+    head.position.y = legH + torsoH + headD / 2;
+    figGroup.add(head);
+
+    figGroup.position.set(35, 0, 20); // clear of columns and the stage
+    scene.add(figGroup);
+  })();
+
+  // ---------- Orbit controls (custom, no extra deps) ----------
+  var navMode = "orbit"; // "orbit" | "fly"
+  var isDragging = false, isPanning = false, lastX = 0, lastY = 0;
+  renderer.domElement.addEventListener("pointerdown", function (e) {
+    if (navMode !== "orbit") return;
+    if (e.button === 2) isPanning = true; else isDragging = true;
+    lastX = e.clientX; lastY = e.clientY;
+    renderer.domElement.setPointerCapture(e.pointerId);
+  });
+  renderer.domElement.addEventListener("pointerup", function () { isDragging = false; isPanning = false; });
+  renderer.domElement.addEventListener("pointercancel", function () { isDragging = false; isPanning = false; });
+  renderer.domElement.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+  renderer.domElement.addEventListener("pointermove", function (e) {
+    if (navMode !== "orbit") return;
+    var dx = e.clientX - lastX, dy = e.clientY - lastY;
+    lastX = e.clientX; lastY = e.clientY;
+    if (isDragging) {
+      spherical.theta -= dx * 0.006;
+      spherical.phi = Math.min(Math.max(spherical.phi - dy * 0.006, 0.08), Math.PI / 2 - 0.02);
+      updateCamera();
+    } else if (isPanning) {
+      var panSpeed = spherical.radius * 0.0016;
+      var right = new THREE.Vector3(Math.cos(spherical.theta), 0, -Math.sin(spherical.theta));
+      target.addScaledVector(right, -dx * panSpeed);
+      target.y += dy * panSpeed;
+      updateCamera();
+    }
+  });
+  renderer.domElement.addEventListener("wheel", function (e) {
+    if (navMode !== "orbit") return;
+    e.preventDefault();
+    spherical.radius = Math.min(Math.max(spherical.radius + e.deltaY * 0.35, 40), 700);
+    updateCamera();
+  }, { passive: false });
+
+  // Touch pinch zoom
+  var lastPinchDist = null;
+  renderer.domElement.addEventListener("touchmove", function (e) {
+    if (navMode !== "orbit") return;
+    if (e.touches.length === 2) {
+      var dx = e.touches[0].clientX - e.touches[1].clientX;
+      var dy = e.touches[0].clientY - e.touches[1].clientY;
+      var dist = Math.sqrt(dx * dx + dy * dy);
+      if (lastPinchDist != null) {
+        spherical.radius = Math.min(Math.max(spherical.radius - (dist - lastPinchDist) * 0.5, 40), 700);
+        updateCamera();
+      }
+      lastPinchDist = dist;
+    }
+  }, { passive: true });
+  renderer.domElement.addEventListener("touchend", function () { lastPinchDist = null; });
+
+  // ---------- Free-fly walk mode (pointer lock + WASD) ----------
+  var flyYaw = spherical.theta, flyPitch = 0;
+  var flyKeys = {};
+  var flyBtn = document.getElementById("flyBtn");
+  var hintEl = document.getElementById("hint");
+  var flyHintEl = document.getElementById("flyHint");
+
+  flyBtn.addEventListener("click", function () {
+    renderer.domElement.requestPointerLock();
+  });
+  document.addEventListener("pointerlockchange", function () {
+    if (document.pointerLockElement === renderer.domElement) {
+      navMode = "fly";
+      // Start flying from roughly where the orbit camera currently is, at head height.
+      flyYaw = -spherical.theta;
+      flyPitch = 0;
+      camera.position.y = 5.5;
+      hintEl.style.display = "none";
+      flyHintEl.style.display = "block";
+      flyBtn.textContent = "🚶 Flying (Esc to stop)";
+    } else {
+      navMode = "orbit";
+      hintEl.style.display = "block";
+      flyHintEl.style.display = "none";
+      flyBtn.textContent = "🚶 Free Fly (click to walk)";
+      // Resume orbit around wherever the fly camera ended up.
+      target.copy(camera.position).add(new THREE.Vector3(Math.sin(-flyYaw) * -10, -2, Math.cos(-flyYaw) * -10));
+      updateCamera();
+    }
+  });
+  document.addEventListener("mousemove", function (e) {
+    if (navMode !== "fly") return;
+    flyYaw -= e.movementX * 0.0022;
+    flyPitch -= e.movementY * 0.0022;
+    flyPitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, flyPitch));
+  });
+  document.addEventListener("keydown", function (e) { flyKeys[e.code] = true; });
+  document.addEventListener("keyup", function (e) { flyKeys[e.code] = false; });
+
+  var flyClock = { last: performance.now() };
+  function updateFly() {
+    var now = performance.now();
+    var dt = Math.min((now - flyClock.last) / 1000, 0.1);
+    flyClock.last = now;
+    if (navMode !== "fly") return;
+
+    camera.rotation.order = "YXZ";
+    camera.rotation.y = flyYaw;
+    camera.rotation.x = flyPitch;
+    camera.rotation.z = 0;
+
+    var speed = (flyKeys.ShiftLeft || flyKeys.ShiftRight) ? 45 : 20;
+    var dir = new THREE.Vector3();
+    camera.getWorldDirection(dir);
+    var flatDir = new THREE.Vector3(dir.x, 0, dir.z).normalize();
+    var rightDir = new THREE.Vector3(flatDir.z, 0, -flatDir.x);
+
+    var move = new THREE.Vector3();
+    if (flyKeys.KeyW) move.add(flatDir);
+    if (flyKeys.KeyS) move.sub(flatDir);
+    if (flyKeys.KeyD) move.sub(rightDir);
+    if (flyKeys.KeyA) move.add(rightDir);
+    if (move.lengthSq() > 0) move.normalize().multiplyScalar(speed * dt);
+    camera.position.add(move);
+
+    if (flyKeys.Space) camera.position.y += speed * dt;
+    if (flyKeys.ControlLeft || flyKeys.KeyC) camera.position.y -= speed * dt;
+    camera.position.y = Math.max(1.5, camera.position.y);
+  }
+
+  // ---------- UI ----------
+  document.getElementById("roofToggle").addEventListener("change", function (e) {
+    roof.visible = e.target.checked;
+  });
+  document.getElementById("heightSlider").addEventListener("input", function (e) {
+    applyHeight(parseFloat(e.target.value));
+  });
+  document.querySelectorAll(".viewbtn").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var v = btn.getAttribute("data-view");
+      if (v === "iso") { spherical.radius = 260; spherical.theta = Math.PI * 0.28; spherical.phi = Math.PI * 0.32; target.set(54, 0, 26); }
+      if (v === "top") { spherical.radius = 260; spherical.theta = 0.001; spherical.phi = 0.05; target.set(54, 0, 26); }
+      if (v === "front") { spherical.radius = 240; spherical.theta = 0; spherical.phi = Math.PI * 0.42; target.set(54, 5, 26); }
+      if (v === "street") { spherical.radius = 110; spherical.theta = Math.PI * 0.55; spherical.phi = Math.PI * 0.42; target.set(25, 3, 32); }
+      updateCamera();
+    });
+  });
+
+  window.addEventListener("resize", function () {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  });
+
+  document.getElementById("loading").style.display = "none";
+
+  function animate() {
+    requestAnimationFrame(animate);
+    updateFly();
+    labelGroup.children.forEach(function (s) { s.quaternion.copy(camera.quaternion); });
+    renderer.render(scene, camera);
+  }
+  animate();
+})();
+</script>
+</body>
+</html>
