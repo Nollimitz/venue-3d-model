@@ -104,6 +104,46 @@
   }
   button.viewbtn:hover { border-color: var(--accent); color: var(--accent); }
 
+  #joystick {
+    position: fixed;
+    left: 22px;
+    bottom: calc(28px + env(safe-area-inset-bottom, 0px));
+    width: 108px; height: 108px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.10);
+    border: 1px solid rgba(255,255,255,0.35);
+    touch-action: none;
+    z-index: 20;
+  }
+  #joystickKnob {
+    position: absolute;
+    left: 50%; top: 50%;
+    width: 44px; height: 44px;
+    margin: -22px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.55);
+    border: 1px solid rgba(255,255,255,0.7);
+    pointer-events: none;
+  }
+  #vertControls {
+    position: fixed;
+    right: 22px;
+    bottom: calc(28px + env(safe-area-inset-bottom, 0px));
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    z-index: 20;
+  }
+  button.vertbtn {
+    width: 52px; height: 52px;
+    border-radius: 50%;
+    background: rgba(255,255,255,0.10);
+    border: 1px solid rgba(255,255,255,0.35);
+    color: #fff;
+    font-size: 18px;
+    touch-action: none;
+  }
+
   /* Phone-sized screens: bigger touch targets, tighter panels, no hover-only affordances */
   @media (max-width: 600px) {
     #top-bar { top: calc(10px + env(safe-area-inset-top, 0px)); left: 10px; right: 10px; gap: 8px; }
@@ -171,7 +211,15 @@
 </div>
 
 <div id="hint">Drag to orbit · Scroll to zoom · Right-drag to pan</div>
-<div id="flyHint" style="display:none;">WASD to move · Mouse to look · Space/Shift up-down · Esc to exit</div>
+<div id="flyHint" style="display:none;">WASD to move · Mouse to look · Space up, Shift sprint · R to reset · Esc to exit</div>
+
+<div id="joystick" style="display:none;">
+  <div id="joystickKnob"></div>
+</div>
+<div id="vertControls" style="display:none;">
+  <button id="upBtn" class="vertbtn">▲</button>
+  <button id="downBtn" class="vertbtn">▼</button>
+</div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 <script>
@@ -416,6 +464,8 @@
   var fpW = Math.max.apply(null, fpXs) - Math.min.apply(null, fpXs);
   var fpD = Math.max.apply(null, fpZs) - Math.min.apply(null, fpZs);
   carpetTex.repeat.set(fpW / 2, fpD / 2); // ~2ft carpet tile repeat, real-world scale
+  var ROOM_CENTER_X = (Math.max.apply(null, fpXs) + Math.min.apply(null, fpXs)) / 2;
+  var ROOM_CENTER_Z = (Math.max.apply(null, fpZs) + Math.min.apply(null, fpZs)) / 2;
 
   var floorMat = new THREE.MeshStandardMaterial({ map: carpetTex, color: 0xffffff, roughness: 1, side: THREE.DoubleSide });
   var floor = new THREE.Mesh(floorGeo, floorMat);
@@ -729,49 +779,148 @@
     if (e.touches.length < 2) { lastPinchDist = null; lastPinchMid = null; }
   });
 
-  // ---------- Free-fly walk mode (pointer lock + WASD) ----------
+  // ---------- Free-fly walk mode: desktop (pointer lock + WASD) or mobile (joystick + touch-look) ----------
   var flyYaw = spherical.theta, flyPitch = 0;
   var flyKeys = {};
   var flyBtn = document.getElementById("flyBtn");
   var hintEl = document.getElementById("hint");
   var flyHintEl = document.getElementById("flyHint");
+  var joystickEl = document.getElementById("joystick");
+  var joystickKnobEl = document.getElementById("joystickKnob");
+  var vertControlsEl = document.getElementById("vertControls");
+  var joystickVec = { x: 0, y: 0 };
+
+  function enterFly() {
+    navMode = "fly";
+    flyYaw = -spherical.theta;
+    flyPitch = 0;
+    camera.position.set(ROOM_CENTER_X, 5.5, ROOM_CENTER_Z);
+    hintEl.style.display = "none";
+    // A focused button intercepts Space as a click (toggling us right back out of fly
+    // mode) — blur it so Space is only ever "move up" while flying.
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  }
+  function resetFlyPosition() {
+    flyYaw = -spherical.theta;
+    flyPitch = 0;
+    camera.position.set(ROOM_CENTER_X, 5.5, ROOM_CENTER_Z);
+  }
+  function exitFly() {
+    navMode = "orbit";
+    hintEl.style.display = "block";
+    flyHintEl.style.display = "none";
+    joystickEl.style.display = "none";
+    vertControlsEl.style.display = "none";
+    joystickVec.x = 0; joystickVec.y = 0;
+    flyKeys = {};
+    flyBtn.textContent = isTouchPrimary ? "🚶 Walk (tap to start)" : "🚶 Free Fly (click to walk)";
+    // Resume orbit around wherever the fly camera ended up.
+    target.copy(camera.position).add(new THREE.Vector3(Math.sin(-flyYaw) * -10, -2, Math.cos(-flyYaw) * -10));
+    updateCamera();
+  }
 
   if (isTouchPrimary || !renderer.domElement.requestPointerLock) {
-    // Free-fly needs a keyboard and mouse-lock, neither of which phones/tablets have —
-    // hide it and rely on the touch-friendly orbit/pinch/pan controls below instead.
-    flyBtn.style.display = "none";
+    // No keyboard / pointer-lock on touch devices — walk mode here uses an on-screen
+    // joystick for movement and one-finger drag anywhere else on screen to look around.
+    flyBtn.textContent = "🚶 Walk (tap to start)";
+    flyBtn.addEventListener("click", function () {
+      if (navMode === "fly") {
+        exitFly();
+      } else {
+        enterFly();
+        flyHintEl.textContent = "Joystick to move · Drag screen to look · ▲▼ for height";
+        flyHintEl.style.display = "block";
+        joystickEl.style.display = "block";
+        vertControlsEl.style.display = "flex";
+        flyBtn.textContent = "✕ Exit Walk";
+      }
+    });
+
+    // Virtual joystick (its own pointer, tracked by id so it doesn't fight with look-drag).
+    var joystickPointerId = null;
+    joystickEl.addEventListener("pointerdown", function (e) {
+      joystickPointerId = e.pointerId;
+      joystickEl.setPointerCapture(e.pointerId);
+    });
+    joystickEl.addEventListener("pointermove", function (e) {
+      if (e.pointerId !== joystickPointerId) return;
+      var rect = joystickEl.getBoundingClientRect();
+      var cx = rect.left + rect.width / 2, cy = rect.top + rect.height / 2;
+      var dx = e.clientX - cx, dy = e.clientY - cy;
+      var maxR = rect.width / 2;
+      var dist = Math.min(Math.sqrt(dx * dx + dy * dy), maxR);
+      var angle = Math.atan2(dy, dx);
+      var kx = Math.cos(angle) * dist, ky = Math.sin(angle) * dist;
+      joystickKnobEl.style.transform = "translate(" + kx + "px," + ky + "px)";
+      joystickVec.x = kx / maxR;
+      joystickVec.y = ky / maxR;
+    });
+    function releaseJoystick(e) {
+      if (e.pointerId !== joystickPointerId) return;
+      joystickPointerId = null;
+      joystickVec.x = 0; joystickVec.y = 0;
+      joystickKnobEl.style.transform = "translate(0,0)";
+    }
+    joystickEl.addEventListener("pointerup", releaseJoystick);
+    joystickEl.addEventListener("pointercancel", releaseJoystick);
+
+    // Up/down buttons, press-and-hold.
+    function bindHold(btn, key) {
+      btn.addEventListener("pointerdown", function (e) { flyKeys[key] = true; btn.setPointerCapture(e.pointerId); });
+      btn.addEventListener("pointerup", function () { flyKeys[key] = false; });
+      btn.addEventListener("pointercancel", function () { flyKeys[key] = false; });
+    }
+    bindHold(document.getElementById("upBtn"), "Space");
+    bindHold(document.getElementById("downBtn"), "TouchDown");
+
+    // Look: one-finger drag anywhere on the canvas that isn't the joystick's own pointer.
+    var lookPointerId = null, lookLastX = 0, lookLastY = 0;
+    renderer.domElement.addEventListener("pointerdown", function (e) {
+      if (navMode !== "fly" || e.pointerId === joystickPointerId) return;
+      lookPointerId = e.pointerId;
+      lookLastX = e.clientX; lookLastY = e.clientY;
+    });
+    renderer.domElement.addEventListener("pointermove", function (e) {
+      if (navMode !== "fly" || e.pointerId !== lookPointerId) return;
+      var dx = e.clientX - lookLastX, dy = e.clientY - lookLastY;
+      lookLastX = e.clientX; lookLastY = e.clientY;
+      flyYaw -= dx * 0.0045;
+      flyPitch -= dy * 0.0045;
+      flyPitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, flyPitch));
+    });
+    renderer.domElement.addEventListener("pointerup", function (e) { if (e.pointerId === lookPointerId) lookPointerId = null; });
+    renderer.domElement.addEventListener("pointercancel", function (e) { if (e.pointerId === lookPointerId) lookPointerId = null; });
   } else {
+    // Desktop: pointer-lock + keyboard.
     flyBtn.addEventListener("click", function () {
       renderer.domElement.requestPointerLock();
     });
+    document.addEventListener("pointerlockchange", function () {
+      if (document.pointerLockElement === renderer.domElement) {
+        enterFly();
+        flyHintEl.textContent = "WASD to move · Mouse to look · Space up, Shift sprint · R to reset · Esc to exit";
+        flyHintEl.style.display = "block";
+        flyBtn.textContent = "🚶 Flying (Esc to stop)";
+      } else {
+        exitFly();
+      }
+    });
+    document.addEventListener("mousemove", function (e) {
+      if (navMode !== "fly") return;
+      flyYaw -= e.movementX * 0.0022;
+      flyPitch -= e.movementY * 0.0022;
+      flyPitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, flyPitch));
+    });
   }
-  document.addEventListener("pointerlockchange", function () {
-    if (document.pointerLockElement === renderer.domElement) {
-      navMode = "fly";
-      // Start flying from roughly where the orbit camera currently is, at head height.
-      flyYaw = -spherical.theta;
-      flyPitch = 0;
-      camera.position.y = 5.5;
-      hintEl.style.display = "none";
-      flyHintEl.style.display = "block";
-      flyBtn.textContent = "🚶 Flying (Esc to stop)";
-    } else {
-      navMode = "orbit";
-      hintEl.style.display = "block";
-      flyHintEl.style.display = "none";
-      flyBtn.textContent = "🚶 Free Fly (click to walk)";
-      // Resume orbit around wherever the fly camera ended up.
-      target.copy(camera.position).add(new THREE.Vector3(Math.sin(-flyYaw) * -10, -2, Math.cos(-flyYaw) * -10));
-      updateCamera();
+  document.addEventListener("keydown", function (e) {
+    flyKeys[e.code] = true;
+    if (navMode === "fly") {
+      // Space would otherwise scroll the page or click a focused button (which is
+      // what caused the accidental "reset" — the Free Fly/Walk button re-triggering).
+      if (e.code === "Space") e.preventDefault();
+      if (e.code === "KeyR") resetFlyPosition();
     }
   });
-  document.addEventListener("mousemove", function (e) {
-    if (navMode !== "fly") return;
-    flyYaw -= e.movementX * 0.0022;
-    flyPitch -= e.movementY * 0.0022;
-    flyPitch = Math.max(-Math.PI / 2 + 0.05, Math.min(Math.PI / 2 - 0.05, flyPitch));
-  });
-  document.addEventListener("keydown", function (e) { flyKeys[e.code] = true; });
   document.addEventListener("keyup", function (e) { flyKeys[e.code] = false; });
 
   var flyClock = { last: performance.now() };
@@ -792,16 +941,28 @@
     var flatDir = new THREE.Vector3(dir.x, 0, dir.z).normalize();
     var rightDir = new THREE.Vector3(flatDir.z, 0, -flatDir.x);
 
-    var move = new THREE.Vector3();
-    if (flyKeys.KeyW) move.add(flatDir);
-    if (flyKeys.KeyS) move.sub(flatDir);
-    if (flyKeys.KeyD) move.sub(rightDir);
-    if (flyKeys.KeyA) move.add(rightDir);
-    if (move.lengthSq() > 0) move.normalize().multiplyScalar(speed * dt);
+    // Keyboard gives a unit direction; the joystick gives an analog (0–1) direction —
+    // combine both, then cap the combined length so holding both doesn't move faster.
+    var kbMove = new THREE.Vector3();
+    if (flyKeys.KeyW) kbMove.add(flatDir);
+    if (flyKeys.KeyS) kbMove.sub(flatDir);
+    if (flyKeys.KeyD) kbMove.sub(rightDir);
+    if (flyKeys.KeyA) kbMove.add(rightDir);
+    if (kbMove.lengthSq() > 0) kbMove.normalize();
+
+    var joyMove = new THREE.Vector3();
+    if (Math.abs(joystickVec.x) > 0.02 || Math.abs(joystickVec.y) > 0.02) {
+      joyMove.addScaledVector(flatDir, -joystickVec.y);
+      joyMove.addScaledVector(rightDir, joystickVec.x);
+    }
+
+    var move = kbMove.add(joyMove);
+    if (move.lengthSq() > 1) move.normalize();
+    move.multiplyScalar(speed * dt);
     camera.position.add(move);
 
     if (flyKeys.Space) camera.position.y += speed * dt;
-    if (flyKeys.ControlLeft || flyKeys.KeyC) camera.position.y -= speed * dt;
+    if (flyKeys.ControlLeft || flyKeys.KeyC || flyKeys.TouchDown) camera.position.y -= speed * dt;
     camera.position.y = Math.max(1.5, camera.position.y);
   }
 
