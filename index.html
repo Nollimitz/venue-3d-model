@@ -104,6 +104,21 @@
   }
   button.viewbtn:hover { border-color: var(--accent); color: var(--accent); }
 
+  /* Phone-sized screens: bigger touch targets, tighter panels, no hover-only affordances */
+  @media (max-width: 600px) {
+    #top-bar { top: calc(10px + env(safe-area-inset-top, 0px)); left: 10px; right: 10px; gap: 8px; }
+    .panel { padding: 10px 12px; border-radius: 12px; }
+    #title-panel { display: none; } /* the description panel just eats space on phones */
+    #controls-panel { min-width: 0; width: 100%; gap: 10px; }
+    #controls-panel label { font-size: 13px; }
+    button.viewbtn { padding: 9px 12px; font-size: 13px; min-height: 38px; }
+    .btn-row { gap: 8px; }
+    .btn-row button.viewbtn { flex: 1 1 auto; }
+    #hint, #flyHint { font-size: 11px; padding: 6px 12px; max-width: 90vw; white-space: normal; text-align: center; }
+    input[type="range"] { height: 26px; }
+    input[type="checkbox"] { width: 18px; height: 18px; }
+  }
+
   #hint, #flyHint {
     position: fixed;
     bottom: calc(14px + env(safe-area-inset-bottom, 0px));
@@ -253,8 +268,10 @@
   }
   updateCamera();
 
-  var renderer = new THREE.WebGLRenderer({ antialias: true });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  var isTouchPrimary = !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+
+  var renderer = new THREE.WebGLRenderer({ antialias: !isTouchPrimary });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, isTouchPrimary ? 1.5 : 2));
   renderer.setSize(window.innerWidth, window.innerHeight);
   container.appendChild(renderer.domElement);
 
@@ -681,22 +698,36 @@
     updateCamera();
   }, { passive: false });
 
-  // Touch pinch zoom
-  var lastPinchDist = null;
+  // Touch: pinch to zoom, two-finger drag to pan (one-finger drag/orbit already
+  // works via the pointerdown/pointermove handlers above, which fire for touch too).
+  var lastPinchDist = null, lastPinchMid = null;
   renderer.domElement.addEventListener("touchmove", function (e) {
     if (navMode !== "orbit") return;
     if (e.touches.length === 2) {
-      var dx = e.touches[0].clientX - e.touches[1].clientX;
-      var dy = e.touches[0].clientY - e.touches[1].clientY;
+      e.preventDefault();
+      var t0 = e.touches[0], t1 = e.touches[1];
+      var dx = t0.clientX - t1.clientX, dy = t0.clientY - t1.clientY;
       var dist = Math.sqrt(dx * dx + dy * dy);
+      var mid = { x: (t0.clientX + t1.clientX) / 2, y: (t0.clientY + t1.clientY) / 2 };
+
       if (lastPinchDist != null) {
         spherical.radius = Math.min(Math.max(spherical.radius - (dist - lastPinchDist) * 0.5, 40), 700);
-        updateCamera();
       }
+      if (lastPinchMid != null) {
+        var mdx = mid.x - lastPinchMid.x, mdy = mid.y - lastPinchMid.y;
+        var panSpeed = spherical.radius * 0.0022;
+        var right = new THREE.Vector3(Math.cos(spherical.theta), 0, -Math.sin(spherical.theta));
+        target.addScaledVector(right, -mdx * panSpeed);
+        target.y += mdy * panSpeed;
+      }
+      updateCamera();
       lastPinchDist = dist;
+      lastPinchMid = mid;
     }
-  }, { passive: true });
-  renderer.domElement.addEventListener("touchend", function () { lastPinchDist = null; });
+  }, { passive: false });
+  renderer.domElement.addEventListener("touchend", function (e) {
+    if (e.touches.length < 2) { lastPinchDist = null; lastPinchMid = null; }
+  });
 
   // ---------- Free-fly walk mode (pointer lock + WASD) ----------
   var flyYaw = spherical.theta, flyPitch = 0;
@@ -705,9 +736,15 @@
   var hintEl = document.getElementById("hint");
   var flyHintEl = document.getElementById("flyHint");
 
-  flyBtn.addEventListener("click", function () {
-    renderer.domElement.requestPointerLock();
-  });
+  if (isTouchPrimary || !renderer.domElement.requestPointerLock) {
+    // Free-fly needs a keyboard and mouse-lock, neither of which phones/tablets have —
+    // hide it and rely on the touch-friendly orbit/pinch/pan controls below instead.
+    flyBtn.style.display = "none";
+  } else {
+    flyBtn.addEventListener("click", function () {
+      renderer.domElement.requestPointerLock();
+    });
+  }
   document.addEventListener("pointerlockchange", function () {
     if (document.pointerLockElement === renderer.domElement) {
       navMode = "fly";
@@ -792,6 +829,9 @@
     renderer.setSize(window.innerWidth, window.innerHeight);
   });
 
+  if (isTouchPrimary) {
+    hintEl.textContent = "Drag to orbit · Pinch to zoom · Two-finger drag to pan";
+  }
   document.getElementById("loading").style.display = "none";
 
   function animate() {
